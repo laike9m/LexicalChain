@@ -19,13 +19,28 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 
+def time_cmp(sgm_time,stt_time):
+    '''
+        比较sgm和stt中的time的大小，返回他们的差。若sgm大,返回正值；stt大返回负值.两个时间都是str类型
+    '''
+    stt_time_list = stt_time.split(':')
+    stt = 0
+    if len(stt_time_list) == 2:
+        stt = float(stt_time_list[0])*60 + float(stt_time_list[1])
+    if len(stt_time_list) == 3:
+        stt = float(stt_time_list[0])*3600 + float(stt_time_list[1])*60 \
+                   + float(stt_time_list[2])
+    sgm = float(sgm_time)
+    return sgm - stt
+
+
 class Chain:
     def __init__(self,sgmfile,sttfile,pinyinfile):
         #self.__dict__.update(locals())
-        self.get_avg_section_length(sgmfile)
         self.stt = open(sttfile,'r')
         self.blocks = self.stt.readlines()
         self.pinyin = open(pinyinfile,'r')
+        self.get_avg_section_length(sgmfile)
         self.make_oneword_list()
         self.make_twoword_list()
         self.make_onesyllable_list(self.pinyin)
@@ -46,41 +61,76 @@ class Chain:
         '''
         file = open(filename,'r')
         lines = file.readlines()
-        self.section_start = []  #存储section开始的行
+        self.section_start = []  #存储标准的section开始的时间,从sgm文件提取
+        self.section_end = []  #存储标准的section结束的时间,从sgm文件提取
         for i in range(len(lines)):
-            if lines[i].startswith('<section ') and not lines[i+1].startswith('</section'):
-                self.section_start.append(i)
+            if lines[i].startswith('<section '):
+                start_time = re.search(r'(?<=startTime=)[^ ]*',lines[i])
+                self.section_start.append(start_time.group())
+                end_time = re.search(r'(?<=endTime=)[^>]*',lines[i])
+                self.section_end.append(end_time.group())
         
-        self.section_length = []#存储每个section的长度,统计的是纯字数
-        for i in range(len(self.section_start)):
-            this_section_length = 0
-            this_section_start = self.section_start[i]
-            if i == len(self.section_start)-1:
-                this_section_end = len(lines)
-            else:
-                this_section_end = self.section_start[i+1] 
-            for linenum in range(this_section_start,this_section_end):
-                 if lines[linenum].startswith(' '): #文字行都是以空格开始
-                     line = lines[linenum]
-                     line = re.sub(r'[ %^,.?\n]','',line)#把带文字的行变为纯文字
-                     this_section_length += len(line)
-            self.section_length.append(this_section_length)
-    
-        self.charsum = sum(self.section_length) #计算这篇文字的总字数
+        '''
+            seg_info存储stt中的分段信息,是一个字典构成的列表,形式如下:
+            [
+             {begt:'1:30',length:39,zi:'江泽明...'},
+             {begt:'2:00',length:50,zi:'下面播放...'},
+             ...
+             ]
+                         每一个字典都是经过筛选得到的stt中的某一个段。这些段保证能涵盖stt的识别出的所有文字
+                         规则:
+                         要保证对于stt文件能够有明确的分段,对sgm文件则不要求每个<section都能够对应
+                         对stt的某个begt,如果有section的startTime核begt差在1s之内,则此begt认为是分段的开始
+        '''
+        self.seg_info = []
+        self.zi_list = []    #存储字的列表,从第一个字到最后一个字
+        
+        i = 0   #stt,block的序号
+        for block in self.blocks:
+            is_section_start = 0    #flag,用来标示这个block是否被认为是段的开始
+            match = re.search(r'(?<=zi=)[^ ]*',block)
+            if match:
+                self.zi_list += match.group()   #这步一定会做,因为要把所有字放入zi_list
+                stt_start = re.search(r'(?<=begt=)[^ ]*',block).group()#stt每一句话的起始时间
+                for sgm_start in self.section_start:
+                    if abs(time_cmp(sgm_start,stt_start)) < 1:
+                        new_dict = {}  #创建新字典,意味着一个新的分段
+                        new_dict['begt'] = stt_start
+                        new_dict['zi'] = match.group()
+                        new_dict['length'] = len(new_dict['zi'])
+                        self.seg_info.append(new_dict)  
+                        is_section_start = 1
+                        break
+                    elif i>0:
+                        pre_stt_start = re.search(r'(?<=begt=)[^ ]*',self.blocks[i-1]).group()#前一个begt
+                        end_index = self.section_start.index(sgm_start)-1 if self.section_start.index(sgm_start)>1 else 0
+                        sgm_end = self.section_end[end_index]    #对应start_time的那个结束时间
+                        if (time_cmp(sgm_start,pre_stt_start)>0 and time_cmp(sgm_start,stt_start)<0) or\
+                            (time_cmp(sgm_end,stt_start)<0 and time_cmp(sgm_start,stt_start)>0):
+                            #sgm夹在两句话的begt之间
+                            new_dict = {}  #创建新字典,意味着一个新的分段
+                            new_dict['begt'] = stt_start
+                            new_dict['zi'] = match.group()
+                            new_dict['length'] = len(new_dict['zi'])
+                            self.seg_info.append(new_dict)  
+                            is_section_start = 1
+                            break
+                if not is_section_start and len(self.seg_info):    #如果不是段的开始,那么就要更新当前的段
+                    current_dict = self.seg_info[-1]
+                    current_dict['zi'] += match.group()
+                    current_dict['length'] = len(current_dict['zi'])
+            i += 1
+
+        self.charsum = len(self.zi_list) #计算这篇文字的总字数
         self.pseudoseqsum = math.ceil(self.charsum/40)#计算伪句子的个数
+        self.section_length = [item['length'] for item in self.seg_info]
         self.segmentation = [sum(self.section_length[0:i+1])/40-1   #这是实际分界对应的伪句子分界编号
                              for i in range(len(self.section_length))]
+        pass
         
         
     def make_oneword_list(self): 
-        '''创建一维子词构成的list,把识别结果中的所有字先和伪句子编号组成一个tuple,再放入一个list'''
-        zi_index = 0  #数了多少个字
-        ps_index = 0    #伪句子的编号
-        self.zi_list = []    #存储(字,ps_index)的列表
-        for block in self.blocks:
-            match = re.search(r'(?<=zi=)[^ ]*',block)
-            if match:
-                self.zi_list += match.group()
+        '''把之前得到的zi_list识别结果中的所有字先和伪句子编号组成一个tuple,再放入一个list'''
         '''把字按40个一段输出到文件 ps.txt,并带上伪句子号,方便之后观察'''
         '''
         ps_file = open('ps.txt','w')
@@ -90,13 +140,14 @@ class Chain:
             ps_file.write(self.zi_list[zi_index])
         ps_file.close()
         '''
+        zi_index = 0  #数了多少个字
+        ps_index = 0    #伪句子的编号
         for zi_index in range(len(self.zi_list)):
             ps_index = int(zi_index/40)
             self.zi_list[zi_index] = (self.zi_list[zi_index],ps_index)
     
     def make_twoword_list(self): 
-        '''创建二维子词构成的list,根据之前得到的一维子词list,直接合并即可'''
-        #make_oneword_list(stt)
+        '''创建二维子词构成的list,根据之前得到的一维子词list,直接合并即可.如果之前没有创建一维词list需要添加上'''
         self.two_zi_list = []
         for i in range(len(self.zi_list)-1):
             add = [self.zi_list[i],self.zi_list[i+1]]
@@ -235,9 +286,9 @@ class Chain:
                     end_psnumber = chainobj.chain[-1][1]   #这个词链的结尾所在的伪句子序号
                     try:
                         if start_psnumber > 0 and start_psnumber<self.pseudoseqsum:
-                            self.chain_strength_sylword[start_psnumber-1] += 1 #相应位置的词链强度+1
+                            self.chain_strength_onesyl[start_psnumber-1] += 1 #相应位置的词链强度+1
                         if end_psnumber < self.pseudoseqsum - 1:
-                            self.chain_strength_sylword[end_psnumber] += 1
+                            self.chain_strength_onesyl[end_psnumber] += 1
                     except IndexError:
                         print('indexerror in computing onesylchain strength')
         elif whichkind == 'twosyl':
@@ -266,17 +317,19 @@ class Chain:
         temp_chain_strength = []
         detect_border_num = 0 #超过阈值的边界数
         real_border_num = 0 #检测到的正确新闻边界数
+        '''
+        approximately_seg是把segmentation:[11.5,23.975,...]扩展成
+        [11,12,23,24,...]这样的,如果检测出的边界在这个list里面,就认为识别到了正确的分界
+        '''
+        approximately_seg = []
+        for i in self.segmentation:
+            if int(i)<i:
+                approximately_seg.extend([int(i),int(i)+1])
+            else:#i是整数的情况,则三个位置都是正确的
+                approximately_seg.extend([i-1,i,i+1])
+                
         if whichkind == 'oneword':
             temp_chain_strength = self.chain_strength_oneword
-            for i in temp_chain_strength:
-                 if i > threshold:
-                     detect_border_num += 1
-                     if i in self.segmentation:
-                         real_border_num += 1
-            precision = real_border_num/detect_border_num
-            recall = real_border_num/len(self.segmentation)
-            F_measure = 2 * precesion * recall/(precesion + recall)
-            
         elif whichkind == 'twoword':
             temp_chain_strength = self.chain_strength_twoword
         elif whichkind == 'onesyl':
@@ -285,6 +338,16 @@ class Chain:
             temp_chain_strength = self.chain_strength_twosyl
         else:
             print('whcihkind error')
+            return 0
+        for i in range(len(temp_chain_strength)):
+             if temp_chain_strength[i] > threshold:
+                 detect_border_num += 1
+                 if i in approximately_seg:
+                     real_border_num += 1
+        precision = real_border_num/detect_border_num
+        recall = real_border_num/len(self.segmentation)
+        F_measure = 2 * precision * recall/(precision + recall)
+        return precision,recall,F_measure
             
 
 class Mylist(list):
@@ -322,10 +385,72 @@ def main(C):
         先计算单独使用每一种的结果,再考虑合起来使用的问题
     '''
     C.calc_chain_strength('oneword')
-    C.calc_fm('oneword',30)
+    C.calc_chain_strength('twoword')
+    C.calc_chain_strength('onesyl')
+    C.calc_chain_strength('twosyl')
+    precision_array = []
+    recall_array = []
+    F_measure_array = [] 
+    threshold_array = range(20,41)
     
+    x = np.array(threshold_array)
+    for i in [1,2,3,4]: 
+        precision_array = []
+        recall_array = []
+        F_measure_array = []
+        precision = 0
+        recall = 0
+        F_measure = 0
+        for threshold in threshold_array:
+            if i == 1:
+                precision,recall,F_measure = C.calc_fm('oneword',threshold)
+            elif i == 2:
+                precision,recall,F_measure = C.calc_fm('twoword',threshold)
+            elif i == 3:
+                precision,recall,F_measure = C.calc_fm('onesyl',threshold)
+            elif i == 4:
+                precision,recall,F_measure = C.calc_fm('twosyl',threshold)
+            precision_array.append(precision)
+            recall_array.append(recall)
+            F_measure_array.append(F_measure)
+        plt.figure()
+        y = np.array(precision_array)
+        z = np.array(recall_array)
+        plt.subplot(220+i)
+        plt.plot(x,y,linewidth=2)
+        plt.plot(x,z,"b--",label="recall")
+        plt.xlabel("Threshold")
+        plt.ylabel("Volt")
+        plt.ylim(0,1)
+        #plt.legend()
+        if i == 1:
+            plt.title("oneword performance curve")
+        elif i == 2:
+            plt.title("twoword performance curve")
+        elif i == 3:
+            plt.title("onesyl performance curve")
+        elif i == 4:
+            plt.title("twosyl performance curve")
+    plt.show()
     
-    
+    '''
+    for threshold in threshold_array:
+        precision,recall,F_measure = C.calc_fm('oneword',threshold)
+        precision_array.append(precision)
+        recall_array.append(recall)
+        F_measure_array.append(F_measure)
+    plt.figure(figsize=(8,4))
+    y = np.array(precision_array)
+    z = np.array(recall_array)
+    plt.plot(x,y,linewidth=2)
+    plt.plot(x,z,"b--",label="recall")
+    plt.xlabel("Threshold")
+    plt.ylabel("Volt")
+    plt.ylim(0,1)
+    plt.legend()
+    plt.title("oneword performance curve")
+    plt.show()
+    '''
     
     
     
