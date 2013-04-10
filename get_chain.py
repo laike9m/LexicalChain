@@ -126,7 +126,16 @@ class Chain:
         self.section_length = [item['length'] for item in self.seg_info]
         self.segmentation = [sum(self.section_length[0:i+1])/40-1   #这是实际分界对应的伪句子分界编号
                              for i in range(len(self.section_length))]
-        pass
+        '''
+        approximately_seg是把segmentation:[11.5,23.975,...]扩展成
+        [11,12,23,24,...]这样的,如果检测出的边界在这个list里面,就认为识别到了正确的分界
+        '''
+        self.approximately_seg = []
+        for i in self.segmentation:
+            if int(i)<i:
+                self.approximately_seg.extend([int(i),int(i)+1])
+            else:#i是整数的情况,则三个位置都是正确的
+                self.approximately_seg.extend([i-1,i,i+1])
         
         
     def make_oneword_list(self): 
@@ -183,10 +192,10 @@ class Chain:
         for zi in self.zi_list: #一定记得zi是tuple
             key = zi[0]
             if key in list(self.oneword_chain.keys()):
-                 if self.oneword_chain[key][-1].add(i,zi):
-                     newchain = chain(i)
-                     newchain.add(i, zi)
-                     self.oneword_chain[key].append(newchain)
+                if self.oneword_chain[key][-1].add(i,zi):
+                    newchain = chain(i)
+                    newchain.add(i, zi)
+                    self.oneword_chain[key].append(newchain)
             else:
                 newchain = chain(i)
                 newchain.add(i, zi)
@@ -201,10 +210,10 @@ class Chain:
         for zi in self.two_zi_list: #一定记得zi是tuple
             key = zi[0][0]+zi[1][0] #把'江'+'泽'='江泽'作为key
             if key in list(self.twoword_chain.keys()):
-                 if self.twoword_chain[key][-1].add(i,zi):
-                     newchain = chain(i)
-                     newchain.add(i, zi)
-                     self.twoword_chain[key].append(newchain)
+                if self.twoword_chain[key][-1].add(i,zi):
+                    newchain = chain(i)
+                    newchain.add(i, zi)
+                    self.twoword_chain[key].append(newchain)
             else:
                 newchain = chain(i)
                 newchain.add(i, zi)
@@ -219,10 +228,10 @@ class Chain:
         for syl in self.syl_list: #一定记得zi是tuple
             key = syl[0]
             if key in list(self.onesyl_chain.keys()):
-                 if self.onesyl_chain[key][-1].add(i,syl):
-                     newchain = chain(i)
-                     newchain.add(i, syl)
-                     self.onesyl_chain[key].append(newchain)
+                if self.onesyl_chain[key][-1].add(i,syl):
+                    newchain = chain(i)
+                    newchain.add(i, syl)
+                    self.onesyl_chain[key].append(newchain)
             else:
                 newchain = chain(i)
                 newchain.add(i, syl)
@@ -237,10 +246,10 @@ class Chain:
         for syl in self.two_syl_list: 
             key = syl[0][0]+syl[1][0] 
             if key in list(self.twosyl_chain.keys()):
-                 if self.twosyl_chain[key][-1].add(i,syl):
-                     newchain = chain(i)
-                     newchain.add(i, syl)
-                     self.twosyl_chain[key].append(newchain)
+                if self.twosyl_chain[key][-1].add(i,syl):
+                    newchain = chain(i)
+                    newchain.add(i, syl)
+                    self.twosyl_chain[key].append(newchain)
             else:
                 newchain = chain(i)
                 newchain.add(i, syl)
@@ -317,16 +326,6 @@ class Chain:
         temp_chain_strength = []
         detect_border_num = 0 #超过阈值的边界数
         real_border_num = 0 #检测到的正确新闻边界数
-        '''
-        approximately_seg是把segmentation:[11.5,23.975,...]扩展成
-        [11,12,23,24,...]这样的,如果检测出的边界在这个list里面,就认为识别到了正确的分界
-        '''
-        approximately_seg = []
-        for i in self.segmentation:
-            if int(i)<i:
-                approximately_seg.extend([int(i),int(i)+1])
-            else:#i是整数的情况,则三个位置都是正确的
-                approximately_seg.extend([i-1,i,i+1])
                 
         if whichkind == 'oneword':
             temp_chain_strength = self.chain_strength_oneword
@@ -340,10 +339,10 @@ class Chain:
             print('whcihkind error')
             return 0
         for i in range(len(temp_chain_strength)):
-             if temp_chain_strength[i] > threshold:
-                 detect_border_num += 1
-                 if i in approximately_seg:
-                     real_border_num += 1
+            if temp_chain_strength[i] > threshold:
+                detect_border_num += 1
+                if i in self.approximately_seg:
+                    real_border_num += 1
         precision = real_border_num/detect_border_num
         recall = real_border_num/len(self.segmentation)
         F_measure = 2 * precision * recall/(precision + recall)
@@ -391,17 +390,19 @@ def main(C):
     precision_array = []
     recall_array = []
     F_measure_array = [] 
-    threshold_array = range(20,41)
+    threshold_array = [range(20,40),range(55,75),range(10,30),range(55,75)]
     
-    x = np.array(threshold_array)
+    
+    plt.figure()
     for i in [1,2,3,4]: 
+        x = np.array(threshold_array[i-1])
         precision_array = []
         recall_array = []
         F_measure_array = []
         precision = 0
         recall = 0
         F_measure = 0
-        for threshold in threshold_array:
+        for threshold in threshold_array[i-1]:
             if i == 1:
                 precision,recall,F_measure = C.calc_fm('oneword',threshold)
             elif i == 2:
@@ -413,11 +414,10 @@ def main(C):
             precision_array.append(precision)
             recall_array.append(recall)
             F_measure_array.append(F_measure)
-        plt.figure()
         y = np.array(precision_array)
         z = np.array(recall_array)
         plt.subplot(220+i)
-        plt.plot(x,y,linewidth=2)
+        plt.plot(x,y,linewidth=2,label='precision')
         plt.plot(x,z,"b--",label="recall")
         plt.xlabel("Threshold")
         plt.ylabel("Volt")
@@ -431,6 +431,7 @@ def main(C):
             plt.title("onesyl performance curve")
         elif i == 4:
             plt.title("twosyl performance curve")
+        plt.legend()
     plt.show()
     
     '''
